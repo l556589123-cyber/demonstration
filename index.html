@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Смотреть экран друга — онлайн трансляция</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            font-family: system-ui, 'Segoe UI', Roboto, sans-serif;
+        }
+        body {
+            background: linear-gradient(135deg, #0a0f1e 0%, #0f172a 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            margin: 0;
+            padding: 20px;
+        }
+        .card {
+            max-width: 1100px;
+            width: 100%;
+            background: rgba(15, 25, 45, 0.8);
+            backdrop-filter: blur(12px);
+            border-radius: 2rem;
+            padding: 2rem;
+            border: 1px solid rgba(59,130,246,0.3);
+            box-shadow: 0 20px 40px rgba(0,0,0,0.5);
+        }
+        h1 {
+            font-size: 2rem;
+            font-weight: 700;
+            text-align: center;
+            color: white;
+            margin: 0 0 0.5rem 0;
+            letter-spacing: -0.5px;
+        }
+        .sub {
+            text-align: center;
+            color: #94a3b8;
+            margin-bottom: 2rem;
+        }
+        .mode-buttons {
+            display: flex;
+            gap: 1rem;
+            justify-content: center;
+            margin-bottom: 2rem;
+            flex-wrap: wrap;
+        }
+        .btn {
+            background: #3b82f6;
+            border: none;
+            color: white;
+            font-weight: 600;
+            padding: 12px 28px;
+            border-radius: 60px;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: 0.2s;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+        }
+        .btn-green {
+            background: #10b981;
+        }
+        .btn-outline {
+            background: transparent;
+            border: 1px solid #3b82f6;
+            color: #93c5fd;
+        }
+        .btn-outline:hover {
+            background: #1e3a8a;
+            color: white;
+        }
+        .btn:hover {
+            transform: scale(0.98);
+            filter: brightness(1.05);
+        }
+        .info-box {
+            background: #0f172a;
+            border-radius: 1.5rem;
+            padding: 1.2rem;
+            margin: 1rem 0;
+            border-left: 4px solid #3b82f6;
+            word-break: break-all;
+        }
+        .link-display {
+            background: #020617;
+            padding: 12px;
+            border-radius: 60px;
+            font-family: monospace;
+            font-size: 0.9rem;
+            color: #60a5fa;
+            text-align: center;
+            margin: 10px 0;
+        }
+        video {
+            width: 100%;
+            max-height: 500px;
+            background: black;
+            border-radius: 20px;
+            display: block;
+            box-shadow: 0 8px 20px black;
+        }
+        .status {
+            font-size: 0.85rem;
+            padding: 8px 16px;
+            background: #111827;
+            border-radius: 40px;
+            color: #cbd5e1;
+            text-align: center;
+            margin-top: 12px;
+        }
+        .flex-between {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        hr {
+            border-color: #2d3a5e;
+            margin: 20px 0;
+        }
+        footer {
+            text-align: center;
+            font-size: 0.7rem;
+            color: #475569;
+            margin-top: 20px;
+        }
+        @media (max-width: 640px) {
+            .card { padding: 1.2rem; }
+            h1 { font-size: 1.5rem; }
+        }
+    </style>
+    <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+</head>
+<body>
+<div class="card" id="app">
+    <h1>🖥️ Смотреть экран друга</h1>
+    <div class="sub">Прямая трансляция без посредников</div>
+
+    <!-- Динамический контент будет меняться в зависимости от режима -->
+    <div id="mainView"></div>
+    <footer>
+        ⚡ WebRTC + PeerJS | Требуется HTTPS (или localhost) для захвата экрана<br>
+        🔒 Видео идёт напрямую между вами, не хранится на серверах.
+    </footer>
+</div>
+
+<script>
+    // --- Состояние ---
+    let currentPeer = null;         // Peer соединение
+    let screenStream = null;        // Поток экрана (для шаринга)
+    let activeCall = null;          // Активный звонок (для получателя)
+    let isSharing = false;
+    let roomId = null;              // ID комнаты (Peer ID транслятора)
+
+    // --- DOM элементы, которые будем пересоздавать ---
+    const mainContainer = document.getElementById('mainView');
+
+    // --- Вспомогательные функции ---
+    function showStatus(message, isError = false) {
+        const statusDiv = document.getElementById('dynamicStatus');
+        if (statusDiv) {
+            statusDiv.innerText = message;
+            statusDiv.style.color = isError ? '#f87171' : '#94a3b8';
+        }
+    }
+
+    // Остановка трансляции (если шарим)
+    async function stopSharing() {
+        if (screenStream) {
+            screenStream.getTracks().forEach(track => track.stop());
+            screenStream = null;
+        }
+        if (activeCall) {
+            activeCall.close();
+            activeCall = null;
+        }
+        isSharing = false;
+        // Не разрушаем peer, чтобы id оставался тем же, но можно переиспользовать
+        renderInterface();
+    }
+
+    // Освободить ресурсы наблюдателя
+    function stopWatching() {
+        if (activeCall) {
+            activeCall.close();
+            activeCall = null;
+        }
+        if (currentPeer && !currentPeer.destroyed) {
+            // Не разрушаем peer, чтобы можно было переподключиться
+        }
+        renderInterface();
+    }
+
+    // --- Рендер интерфейса в зависимости от режима (шаринг или просмотр) ---
+    function renderInterface() {
+        const urlParams = new URLSearchParams(window.location.search);
+        const roomFromUrl = urlParams.get('room');
+        
+        // Если есть параметр room и мы не в режиме шаринга, показываем интерфейс просмотра
+        if (roomFromUrl && !isSharing) {
+            renderViewerMode(roomFromUrl);
+        } else {
+            renderSharerMode();
+        }
+    }
+
+    // Режим: я показываю свой экран (друг)
+    function renderSharerMode() {
+        mainContainer.innerHTML = `
+            <div style="text-align: center;">
+                <button id="startShareBtn" class="btn btn-green">📡 Начать показ экрана</button>
+                <div id="sharerInfo" style="margin-top: 20px;"></div>
+                <div id="shareVideoArea" style="display: none; margin-top: 20px;">
+                    <video id="localPreview" autoplay muted playsinline style="max-height: 300px;"></video>
+                    <div class="flex-between" style="margin-top: 12px;">
+                        <button id="stopShareBtn" class="btn-outline">⏹️ Остановить показ</button>
+                        <button id="copyLinkBtn" class="btn-outline" style="display: none;">📋 Скопировать ссылку</button>
+                    </div>
+                </div>
+                <div id="dynamicStatus" class="status">⚡ Не активен</div>
+            </div>
+        `;
+
+        const startBtn = document.getElementById('startShareBtn');
+        const stopShareBtn = document.getElementById('stopShareBtn');
+        const copyLinkBtn = document.getElementById('copyLinkBtn');
+        const sharerInfo = document.getElementById('sharerInfo');
+        const videoArea = document.getElementById('shareVideoArea');
+        const localVideo = document.getElementById('localPreview');
+        const statusDiv = document.getElementById('dynamicStatus');
+
+        // Начать трансляцию экрана
+        startBtn.onclick = async () => {
+            if (isSharing) return;
+            statusDiv.innerText = '⏳ Запрашиваем доступ к экрану...';
+            try {
+                const stream = await navigator.mediaDevices.getDisplayMedia({
+                    video: true,
+                    audio: false
+                });
+                screenStream = stream;
+                localVideo.srcObject = stream;
+                videoArea.style.display = 'block';
+                
+                // Если peer уже есть и живой - используем его, иначе создаём
+                if (!currentPeer || currentPeer.destroyed) {
+                    currentPeer = new Peer({
+                        debug: 0,
+                        config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
+                    });
+                    await new Promise((resolve) => {
+                        if (currentPeer.id) resolve();
+                        else currentPeer.once('open', resolve);
+                    });
+                }
+                const myId = currentPeer.id;
+                roomId = myId;
+                
+                // Генерируем ссылку для владельца
+                const fullUrl = `${window.location.origin}${window.location.pathname}?room=${myId}`;
+                sharerInfo.innerHTML = `
+                    <div class="info-box">
+                        🆔 <strong>Ваш ID комнаты:</strong> ${myId}<br>
+                        🔗 <strong>Ссылка для наблюдателя:</strong><br>
+                        <div class="link-display">${fullUrl}</div>
+                        <button id="copyUrlBtn" class="btn-outline" style="margin-top: 8px;">📋 Скопировать ссылку</button>
+                        <p style="font-size:0.8rem; margin-top:8px;">Отправьте эту ссылку другу (владельцу) — он сразу увидит ваш экран.</p>
+                    </div>
+                `;
+                const copyUrlBtn = document.getElementById('copyUrlBtn');
+                if (copyUrlBtn) {
+                    copyUrlBtn.onclick = () => {
+                        navigator.clipboard.writeText(fullUrl);
+                        alert('Ссылка скопирована! Отправьте её владельцу.');
+                    };
+                }
+                
+                // Обработчик входящих звонков от владельца
+                setupCallReceiver();
+                
+                // Остановка захвата через системную кнопку браузера
+                stream.getVideoTracks()[0].onended = () => {
+                    stopSharing();
+                    statusDiv.innerText = '🔴 Показ экрана остановлен (вы закрыли окно выбора)';
+                };
+                
+                isSharing = true;
+                statusDiv.innerText = '✅ Экран транслируется! Отправьте ссылку другу.';
+                startBtn.disabled = true;
+                startBtn.style.opacity = '0.6';
+                
+                if (copyLinkBtn) copyLinkBtn.style.display = 'inline-block';
+            } catch (err) {
+                console.error(err);
+                statusDiv.innerText = '❌ Ошибка: ' + (err.message || 'не удалось получить доступ к экрану');
+                if (err.name === 'NotAllowedError') statusDiv.innerText = '❌ Разрешите доступ к экрану в браузере';
+                videoArea.style.display = 'none';
+            }
+        };
+        
+        // Остановить трансляцию
+        if (stopShareBtn) {
+            stopShareBtn.onclick = () => {
+                stopSharing();
+                startBtn.disabled = false;
+                startBtn.style.opacity = '1';
+                statusDiv.innerText = '⚡ Трансляция остановлена';
+                sharerInfo.innerHTML = '';
+                videoArea.style.display = 'none';
+                if (copyLinkBtn) copyLinkBtn.style.display = 'none';
+                isSharing = false;
+                if (currentPeer && !currentPeer.destroyed) {
+                    // Можно оставить peer живым, но без потока
+                }
+            };
+        }
+        
+        // Кнопка копирования ссылки (после старта)
+        if (copyLinkBtn) {
+            copyLinkBtn.onclick = () => {
+                if (roomId) {
+                    const url = `${window.location.origin}${window.location.pathname}?room=${roomId}`;
+                    navigator.clipboard.writeText(url);
+                    alert('Ссылка скопирована');
+                }
+            };
+        }
+    }
+
+    // Настройка обработчика входящих звонков (со стороны транслятора)
+    function setupCallReceiver() {
+        if (!currentPeer) return;
+        // Удаляем старые обработчики, чтобы не дублировать
+        currentPeer.removeAllListeners('call');
+        currentPeer.on('call', (call) => {
+            if (!screenStream) {
+                call.close();
+                showStatus('⚠️ Поступил запрос, но экран не показывается', true);
+                return;
+            }
+            if (activeCall) activeCall.close();
+            activeCall = call;
+            call.answer(screenStream);
+            call.on('close', () => {
+                activeCall = null;
+                showStatus('👀 Наблюдатель отключился, трансляция продолжается');
+            });
+            showStatus('📡 Кто-то смотрит ваш экран!');
+        });
+    }
+
+    // Режим: я смотрю экран друга (владелец)
+    function renderViewerMode(roomIdFromUrl) {
+        mainContainer.innerHTML = `
+            <div style="text-align: center;">
+                <div id="viewerInfo">
+                    <div class="info-box">
+                        🎯 Подключение к комнате: <strong>${roomIdFromUrl}</strong>
+                    </div>
+                    <button id="connectBtn" class="btn">👁️ Смотреть экран</button>
+                    <div id="viewerVideoArea" style="display: none; margin-top: 20px;">
+                        <video id="remoteVideo" autoplay playsinline></video>
+                        <div class="flex-between" style="margin-top: 12px;">
+                            <button id="disconnectBtn" class="btn-outline">🔌 Отключиться</button>
+                        </div>
+                    </div>
+                    <div id="dynamicStatus" class="status">⚡ Введите ID или нажмите «Смотреть»</div>
+                </div>
+            </div>
+        `;
+        
+        const connectBtn = document.getElementById('connectBtn');
+        const disconnectBtn = document.getElementById('disconnectBtn');
+        const videoArea = document.getElementById('viewerVideoArea');
+        const remoteVideo = document.getElementById('remoteVideo');
+        const statusDiv = document.getElementById('dynamicStatus');
+        
+        let currentViewerCall = null;
+        
+        connectBtn.onclick = async () => {
+            if (currentViewerCall) {
+                statusDiv.innerText = 'Уже подключено';
+                return;
+            }
+            statusDiv.innerText = '⏳ Подключение к транслятору...';
+            try {
+                // Создаём peer для наблюдателя, если нет
+                if (!currentPeer || currentPeer.destroyed) {
+                    currentPeer = new Peer({
+                        debug: 0,
+                        config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
+                    });
+                    await new Promise((resolve) => {
+                        if (currentPeer.id) resolve();
+                        else currentPeer.once('open', resolve);
+                    });
+                }
+                // Совершаем звонок транслятору (без отправки своего потока)
+                const call = currentPeer.call(roomIdFromUrl, null);
+                currentViewerCall = call;
+                
+                call.on('stream', (remoteStream) => {
+                    remoteVideo.srcObject = remoteStream;
+                    videoArea.style.display = 'block';
+                    statusDiv.innerText = '🟢 Трансляция идёт! Вы смотрите экран друга.';
+                });
+                call.on('error', (err) => {
+                    console.error(err);
+                    statusDiv.innerText = '❌ Ошибка: не удалось подключиться. Убедитесь, что друг начал показ экрана и ссылка верна.';
+                    videoArea.style.display = 'none';
+                    currentViewerCall = null;
+                });
+                call.on('close', () => {
+                    statusDiv.innerText = '🔴 Трансляция завершена';
+                    videoArea.style.display = 'none';
+                    remoteVideo.srcObject = null;
+                    currentViewerCall = null;
+                });
+            } catch (err) {
+                statusDiv.innerText = '❌ Ошибка соединения: ' + err.message;
+            }
+        };
+        
+        if (disconnectBtn) {
+            disconnectBtn.onclick = () => {
+                if (currentViewerCall) {
+                    currentViewerCall.close();
+                    currentViewerCall = null;
+                }
+                remoteVideo.srcObject = null;
+                videoArea.style.display = 'none';
+                statusDiv.innerText = '⚡ Отключено. Нажмите «Смотреть» снова для переподключения.';
+            };
+        }
+        
+        // Если есть room в URL, можно автоматически начать подключение
+        if (roomIdFromUrl) {
+            setTimeout(() => {
+                if (connectBtn) connectBtn.click();
+            }, 500);
+        }
+    }
+
+    // --- Инициализация при загрузке ---
+    window.addEventListener('load', () => {
+        renderInterface();
+        // Обработка изменения URL (если пользователь переходит по ссылке внутри страницы)
+        window.addEventListener('popstate', () => {
+            renderInterface();
+        });
+    });
+</script>
+</body>
+</html>
